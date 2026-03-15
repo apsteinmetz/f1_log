@@ -8,6 +8,7 @@ library(glue)
 
 season_year <- 2026
 base_url <- "https://api.jolpi.ca/ergast/f1"
+predictions_file <- "data/predictions.rds"
 
 country_iso_lookup <- c(
   "Abu Dhabi" = "ae",
@@ -102,6 +103,7 @@ get_schedule <- function(season) {
       round = as.integer(r$round %||% NA_integer_),
       race = r$raceName %||% "",
       circuit = r$Circuit$circuitName %||% "",
+      circuit_url = r$Circuit$url %||% NA_character_,
       country = loc$country %||% "",
       locality = loc$locality %||% "",
       lat = as.numeric(loc$lat %||% NA_real_),
@@ -181,6 +183,27 @@ get_qualifying <- function(season, round) {
       q1 = x$Q1 %||% "",
       q2 = x$Q2 %||% "",
       q3 = x$Q3 %||% ""
+    )
+  }) |>
+    arrange(position)
+}
+
+get_sprint <- function(season, round) {
+  resp <- fetch_json(glue("{season}/{round}/sprint"), limit = 200)
+  if (is.null(resp) || is.null(resp$MRData$RaceTable$Races)) {
+    return(tibble())
+  }
+  races <- resp$MRData$RaceTable$Races %||% list()
+  if (length(races) == 0 || is.null(races[[1]]$SprintResults)) {
+    return(tibble())
+  }
+  map_dfr(races[[1]]$SprintResults, function(x) {
+    tibble(
+      position = as.integer(x$position %||% NA_integer_),
+      driver = paste(x$Driver$givenName, x$Driver$familyName),
+      constructor = x$Constructor$name %||% "",
+      points = as.numeric(x$points %||% NA_real_),
+      status = x$status %||% ""
     )
   }) |>
     arrange(position)
@@ -359,34 +382,95 @@ ui <- page_navbar(
   ),
   nav_panel(
     "Predictions",
-    layout_columns(
-      col_widths = c(6, 6),
-      card(
-        card_header("Season Predictions"),
-        card_body(
-          h5("Drivers"),
-          uiOutput("driver_predictions"),
-          h5(class = "mt-3", "Teams"),
-          uiOutput("team_predictions"),
-          h5(class = "mt-3", "Most Podiums"),
-          layout_columns(
-            selectInput("most_podium_driver", "Driver", choices = NULL),
-            selectInput("most_podium_team", "Team", choices = NULL)
+    card(
+      card_body(
+        class = "py-2",
+        layout_columns(
+          col_widths = c(4, 4, 4),
+          textInput("user_name", "Your Name", placeholder = "Enter your name"),
+          actionButton(
+            "load_predictions",
+            "Load My Predictions",
+            class = "btn-primary mt-4"
           ),
           actionButton(
-            "clear_predictions",
+            "save_predictions",
+            "Save My Predictions",
+            class = "btn-success mt-4"
+          )
+        )
+      )
+    ),
+    layout_columns(
+      col_widths = c(3, 2, 3, 2, 2),
+      card(
+        card_header("Driver Predictions"),
+        card_body(
+          uiOutput("driver_predictions"),
+          actionButton(
+            "clear_driver_predictions",
             "Clear",
-            class = "btn-secondary mt-3"
+            class = "btn-secondary btn-sm mt-2"
           )
         )
       ),
       card(
-        card_header("Current Standings"),
+        card_header("Driver Standings"),
         card_body(
-          h5("Drivers"),
-          tableOutput("driver_standings_table"),
-          h5(class = "mt-3", "Constructors"),
+          tableOutput("driver_standings_table")
+        )
+      ),
+      card(
+        card_header("Team Predictions"),
+        card_body(
+          uiOutput("team_predictions"),
+          actionButton(
+            "clear_team_predictions",
+            "Clear",
+            class = "btn-secondary btn-sm mt-2"
+          )
+        )
+      ),
+      card(
+        card_header("Constructor Standings"),
+        card_body(
           tableOutput("constructor_standings_table")
+        )
+      ),
+      card(
+        card_header("Podium Predictions"),
+        card_body(
+          div(
+            class = "d-flex align-items-center mb-2",
+            tags$label("Driver", class = "me-2", style = "min-width: 50px;"),
+            div(
+              style = "flex: 1;",
+              selectInput(
+                "most_podium_driver",
+                NULL,
+                choices = NULL,
+                width = "100%"
+              )
+            )
+          ),
+          div(
+            class = "d-flex align-items-center mb-2",
+            tags$label("Team", class = "me-2", style = "min-width: 50px;"),
+            div(
+              style = "flex: 1;",
+              selectInput(
+                "most_podium_team",
+                NULL,
+                choices = NULL,
+                width = "100%"
+              )
+            )
+          ),
+          actionButton(
+            "clear_podium_predictions",
+            "Clear",
+            class = "btn-secondary btn-sm mt-2"
+          )
         )
       )
     )
@@ -506,6 +590,13 @@ server <- function(input, output, session) {
       return(tibble())
     }
     get_qualifying(season_year, selected_round())
+  })
+
+  sprint_data <- reactive({
+    if (!race_past()) {
+      return(tibble())
+    }
+    get_sprint(season_year, selected_round())
   })
 
   race_results <- reactive({
@@ -645,6 +736,17 @@ server <- function(input, output, session) {
     digits = 3
   )
 
+  output$sprint_table <- renderTable(
+    {
+      sprint_data()
+    },
+    striped = TRUE,
+    bordered = TRUE,
+    width = "100%",
+    spacing = "s",
+    digits = 3
+  )
+
   output$result_table <- renderTable(
     {
       race_results() |> select(position, driver, constructor, points, status)
@@ -704,33 +806,50 @@ server <- function(input, output, session) {
         return(tags$p("Race not found."))
       }
       metrics <- race_highlights()
-      tagList(
-        div(
-          class = "mb-3",
-          actionButton(
-            "close_race",
-            "← Back to Schedule",
-            class = "btn-secondary"
+      sprint <- sprint_data()
+      has_sprint <- nrow(sprint) > 0
+
+      # Build cards list dynamically to avoid gaps
+      cards_list <- list(
+        card(
+          card_header(paste("Round", info$round[[1]], "-", info$race[[1]])),
+          card_body(
+            p(flag_badge(info$country[[1]])),
+            p(tags$a(
+              href = info$circuit_url[[1]],
+              target = "_blank",
+              info$circuit[[1]]
+            )),
+            p(info$locality[[1]]),
+            p(ifelse(race_past(), "Completed", "Upcoming")),
+            leafletOutput("circuit_map", height = 260)
           )
         ),
-        layout_columns(
-          col_widths = c(3, 3, 3, 3),
-          card(
-            card_header(paste("Round", info$round[[1]], "-", info$race[[1]])),
-            card_body(
-              p(flag_badge(info$country[[1]])),
-              p(info$circuit[[1]]),
-              p(info$locality[[1]]),
-              p(ifelse(race_past(), "Completed", "Upcoming")),
-              leafletOutput("circuit_map", height = 260)
+        card(
+          card_header("Qualifying"),
+          card_body(
+            if (race_past()) tableOutput("qual_table") else p("No data yet.")
+          )
+        )
+      )
+
+      if (has_sprint) {
+        cards_list <- c(
+          cards_list,
+          list(
+            card(
+              card_header("Sprint"),
+              card_body(
+                tableOutput("sprint_table")
+              )
             )
-          ),
-          card(
-            card_header("Qualifying"),
-            card_body(
-              if (race_past()) tableOutput("qual_table") else p("No data yet.")
-            )
-          ),
+          )
+        )
+      }
+
+      cards_list <- c(
+        cards_list,
+        list(
           card(
             card_header("Race Results"),
             card_body(
@@ -768,10 +887,35 @@ server <- function(input, output, session) {
           )
         )
       )
+
+      tagList(
+        div(
+          class = "mb-3",
+          actionButton(
+            "close_race",
+            "← Back to Schedule",
+            class = "btn-secondary"
+          )
+        ),
+        do.call(
+          layout_columns,
+          c(
+            list(
+              col_widths = if (has_sprint) c(3, 2, 2, 2, 3) else c(3, 3, 3, 3)
+            ),
+            cards_list
+          )
+        )
+      )
     }
   })
 
-  preds <- reactiveValues(drivers = NULL, teams = NULL)
+  preds <- reactiveValues(
+    drivers = NULL,
+    teams = NULL,
+    podium_driver = NA_character_,
+    podium_team = NA_character_
+  )
 
   observeEvent(
     drivers_list(),
@@ -807,12 +951,24 @@ server <- function(input, output, session) {
       return(tags$p("Drivers unavailable."))
     }
     lapply(seq_along(drv), function(i) {
-      selectInput(
-        inputId = paste0("driver_rank_", i),
-        label = paste("P", i),
-        choices = available_choice(drv, preds$drivers, i),
-        selected = preds$drivers[[i]],
-        width = "100%"
+      div(
+        class = "d-flex align-items-center",
+        style = "margin-bottom: -10px;",
+        tags$span(
+          paste0("P", i),
+          class = "me-2",
+          style = "min-width: 30px; font-weight: 500;"
+        ),
+        div(
+          style = "flex: 1;",
+          selectInput(
+            inputId = paste0("driver_rank_", i),
+            label = NULL,
+            choices = available_choice(drv, preds$drivers, i),
+            selected = preds$drivers[[i]],
+            width = "100%"
+          )
+        )
       )
     })
   })
@@ -823,26 +979,33 @@ server <- function(input, output, session) {
       return(tags$p("Constructors unavailable."))
     }
     lapply(seq_along(tm), function(i) {
-      selectInput(
-        inputId = paste0("team_rank_", i),
-        label = paste("P", i),
-        choices = available_choice(tm, preds$teams, i),
-        selected = preds$teams[[i]],
-        width = "100%"
+      div(
+        class = "d-flex align-items-center",
+        style = "margin-bottom: -10px;",
+        tags$span(
+          paste0("P", i),
+          class = "me-2",
+          style = "min-width: 30px; font-weight: 500;"
+        ),
+        div(
+          style = "flex: 1;",
+          selectInput(
+            inputId = paste0("team_rank_", i),
+            label = NULL,
+            choices = available_choice(tm, preds$teams, i),
+            selected = preds$teams[[i]],
+            width = "100%"
+          )
+        )
       )
     })
   })
 
-  observeEvent(input$clear_predictions, {
+  observeEvent(input$clear_driver_predictions, {
     preds$drivers <- if (length(drivers_list()) == 0) {
       NULL
     } else {
       rep(NA_character_, length(drivers_list()))
-    }
-    preds$teams <- if (length(constructors_list()) == 0) {
-      NULL
-    } else {
-      rep(NA_character_, length(constructors_list()))
     }
     if (!is.null(preds$drivers)) {
       walk(
@@ -854,6 +1017,14 @@ server <- function(input, output, session) {
         )
       )
     }
+  })
+
+  observeEvent(input$clear_team_predictions, {
+    preds$teams <- if (length(constructors_list()) == 0) {
+      NULL
+    } else {
+      rep(NA_character_, length(constructors_list()))
+    }
     if (!is.null(preds$teams)) {
       walk(
         seq_along(preds$teams),
@@ -864,8 +1035,122 @@ server <- function(input, output, session) {
         )
       )
     }
+  })
+
+  observeEvent(input$clear_podium_predictions, {
     updateSelectInput(session, "most_podium_driver", selected = NA_character_)
     updateSelectInput(session, "most_podium_team", selected = NA_character_)
+    preds$podium_driver <- NA_character_
+    preds$podium_team <- NA_character_
+  })
+
+  # Track podium selections
+  observeEvent(input$most_podium_driver, {
+    preds$podium_driver <- input$most_podium_driver
+  })
+  observeEvent(input$most_podium_team, {
+    preds$podium_team <- input$most_podium_team
+  })
+
+  # Save predictions to file
+  observeEvent(input$save_predictions, {
+    req(input$user_name)
+    user_name <- trimws(input$user_name)
+    if (nchar(user_name) == 0) {
+      showNotification("Please enter your name.", type = "warning")
+      return()
+    }
+
+    # Load existing predictions or create new list
+    all_preds <- if (file.exists(predictions_file)) {
+      readRDS(predictions_file)
+    } else {
+      list()
+    }
+
+    # Save this user's predictions
+    all_preds[[user_name]] <- list(
+      drivers = preds$drivers,
+      teams = preds$teams,
+      podium_driver = preds$podium_driver,
+      podium_team = preds$podium_team,
+      timestamp = Sys.time()
+    )
+
+    saveRDS(all_preds, predictions_file)
+    showNotification(
+      paste("Predictions saved for", user_name),
+      type = "message"
+    )
+  })
+
+  # Load predictions from file
+  observeEvent(input$load_predictions, {
+    req(input$user_name)
+    user_name <- trimws(input$user_name)
+    if (nchar(user_name) == 0) {
+      showNotification("Please enter your name.", type = "warning")
+      return()
+    }
+
+    if (!file.exists(predictions_file)) {
+      showNotification("No saved predictions found.", type = "warning")
+      return()
+    }
+
+    all_preds <- readRDS(predictions_file)
+    if (!user_name %in% names(all_preds)) {
+      showNotification(
+        paste("No predictions found for", user_name),
+        type = "warning"
+      )
+      return()
+    }
+
+    user_preds <- all_preds[[user_name]]
+
+    # Restore driver predictions
+    if (!is.null(user_preds$drivers)) {
+      preds$drivers <- user_preds$drivers
+      walk(seq_along(user_preds$drivers), function(i) {
+        updateSelectInput(
+          session,
+          paste0("driver_rank_", i),
+          selected = user_preds$drivers[[i]]
+        )
+      })
+    }
+
+    # Restore team predictions
+    if (!is.null(user_preds$teams)) {
+      preds$teams <- user_preds$teams
+      walk(seq_along(user_preds$teams), function(i) {
+        updateSelectInput(
+          session,
+          paste0("team_rank_", i),
+          selected = user_preds$teams[[i]]
+        )
+      })
+    }
+
+    # Restore podium predictions
+    preds$podium_driver <- user_preds$podium_driver
+    preds$podium_team <- user_preds$podium_team
+    updateSelectInput(
+      session,
+      "most_podium_driver",
+      selected = user_preds$podium_driver
+    )
+    updateSelectInput(
+      session,
+      "most_podium_team",
+      selected = user_preds$podium_team
+    )
+
+    showNotification(
+      paste("Predictions loaded for", user_name),
+      type = "message"
+    )
   })
 
   observe({
@@ -904,18 +1189,18 @@ server <- function(input, output, session) {
 
   output$driver_standings_table <- renderTable(
     {
-      driver_standings()
+      driver_standings() |>
+        select(Pos = position, Driver = driver)
     },
-    digits = 2,
     striped = TRUE,
     bordered = TRUE
   )
 
   output$constructor_standings_table <- renderTable(
     {
-      constructor_standings()
+      constructor_standings() |>
+        select(Pos = position, Constructor = constructor)
     },
-    digits = 2,
     striped = TRUE,
     bordered = TRUE
   )
