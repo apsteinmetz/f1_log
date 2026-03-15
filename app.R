@@ -167,30 +167,31 @@ get_results <- function(season, round) {
 }
 
 get_previous_winner <- function(circuit_name) {
-
   # Fetch 2025 schedule to find the round for this circuit
   sched_2025 <- get_schedule(2025)
   if (nrow(sched_2025) == 0) {
     return(list(driver = NA_character_, team = NA_character_))
   }
-  
+
   # Find the matching circuit in 2025
-  match_row <- sched_2025 |> filter(circuit == circuit_name) |> slice_head(n = 1)
+  match_row <- sched_2025 |>
+    filter(circuit == circuit_name) |>
+    slice_head(n = 1)
   if (nrow(match_row) == 0) {
     return(list(driver = NA_character_, team = NA_character_))
   }
-  
+
   # Get results for that round
   results <- get_results(2025, match_row$round[[1]])
   if (nrow(results) == 0) {
     return(list(driver = NA_character_, team = NA_character_))
   }
-  
+
   winner <- results |> filter(position == 1) |> slice_head(n = 1)
   if (nrow(winner) == 0) {
     return(list(driver = NA_character_, team = NA_character_))
   }
-  
+
   list(driver = winner$driver[[1]], team = winner$constructor[[1]])
 }
 
@@ -858,7 +859,7 @@ server <- function(input, output, session) {
       } else {
         NULL
       }
-      
+
       cards_list <- list(
         card(
           card_header(paste("Round", info$round[[1]], "-", info$race[[1]])),
@@ -871,7 +872,9 @@ server <- function(input, output, session) {
                 info$circuit[[1]]
               ),
               if (!is.null(winner_text)) tags$br(),
-              if (!is.null(winner_text)) tags$small(class = "text-muted", winner_text)
+              if (!is.null(winner_text)) {
+                tags$small(class = "text-muted", winner_text)
+              }
             ),
             p(info$locality[[1]]),
             p(ifelse(race_past(), "Completed", "Upcoming")),
