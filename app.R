@@ -12,7 +12,7 @@ predictions_file <- "data/predictions.rds"
 
 country_iso_lookup <- c(
   "Abu Dhabi" = "ae",
-  "United Arab Emirates" = "ae",
+  "UAE" = "ae",
   "Argentina" = "ar",
   "Australia" = "au",
   "Austria" = "at",
@@ -164,6 +164,34 @@ get_results <- function(season, round) {
     )
   }) |>
     arrange(position)
+}
+
+get_previous_winner <- function(circuit_name) {
+
+  # Fetch 2025 schedule to find the round for this circuit
+  sched_2025 <- get_schedule(2025)
+  if (nrow(sched_2025) == 0) {
+    return(list(driver = NA_character_, team = NA_character_))
+  }
+  
+  # Find the matching circuit in 2025
+  match_row <- sched_2025 |> filter(circuit == circuit_name) |> slice_head(n = 1)
+  if (nrow(match_row) == 0) {
+    return(list(driver = NA_character_, team = NA_character_))
+  }
+  
+  # Get results for that round
+  results <- get_results(2025, match_row$round[[1]])
+  if (nrow(results) == 0) {
+    return(list(driver = NA_character_, team = NA_character_))
+  }
+  
+  winner <- results |> filter(position == 1) |> slice_head(n = 1)
+  if (nrow(winner) == 0) {
+    return(list(driver = NA_character_, team = NA_character_))
+  }
+  
+  list(driver = winner$driver[[1]], team = winner$constructor[[1]])
 }
 
 get_qualifying <- function(season, round) {
@@ -478,13 +506,19 @@ ui <- page_navbar(
   nav_panel(
     "Driver Points",
     card(
-      card_body(tableOutput("driver_points"))
+      card_body(
+        style = "overflow-x: auto;",
+        uiOutput("driver_points")
+      )
     )
   ),
   nav_panel(
     "Team Points",
     card(
-      card_body(tableOutput("team_points"))
+      card_body(
+        style = "overflow-x: auto;",
+        uiOutput("team_points")
+      )
     )
   ),
   nav_panel(
@@ -575,6 +609,14 @@ server <- function(input, output, session) {
       return(tibble())
     }
     sched |> filter(round == sel) |> slice_head(n = 1)
+  })
+
+  prev_winner <- reactive({
+    info <- race_info()
+    if (nrow(info) == 0) {
+      return(list(driver = NA_character_, team = NA_character_))
+    }
+    get_previous_winner(info$circuit[[1]])
   })
 
   race_past <- reactive({
@@ -810,16 +852,27 @@ server <- function(input, output, session) {
       has_sprint <- nrow(sprint) > 0
 
       # Build cards list dynamically to avoid gaps
+      prev <- prev_winner()
+      winner_text <- if (!is.na(prev$driver) && !is.na(prev$team)) {
+        paste0("2025 Winner: ", prev$driver, " (", prev$team, ")")
+      } else {
+        NULL
+      }
+      
       cards_list <- list(
         card(
           card_header(paste("Round", info$round[[1]], "-", info$race[[1]])),
           card_body(
             p(flag_badge(info$country[[1]])),
-            p(tags$a(
-              href = info$circuit_url[[1]],
-              target = "_blank",
-              info$circuit[[1]]
-            )),
+            p(
+              tags$a(
+                href = info$circuit_url[[1]],
+                target = "_blank",
+                info$circuit[[1]]
+              ),
+              if (!is.null(winner_text)) tags$br(),
+              if (!is.null(winner_text)) tags$small(class = "text-muted", winner_text)
+            ),
             p(info$locality[[1]]),
             p(ifelse(race_past(), "Completed", "Upcoming")),
             leafletOutput("circuit_map", height = 260)
@@ -901,7 +954,7 @@ server <- function(input, output, session) {
           layout_columns,
           c(
             list(
-              col_widths = if (has_sprint) c(3, 2, 2, 2, 3) else c(3, 3, 3, 3)
+              col_widths = if (has_sprint) c(3, 3, 2, 2, 2) else c(4, 3, 3, 2)
             ),
             cards_list
           )
@@ -1205,61 +1258,169 @@ server <- function(input, output, session) {
     bordered = TRUE
   )
 
-  driver_points_table <- reactive({
+  # Helper to build flag image HTML string
+  flag_img <- function(country, size = 24) {
+    if (is.null(country) || is.na(country) || country == "") {
+      return("")
+    }
+    code <- unname(country_iso_lookup[country])
+    if (is.na(code) || is.null(code)) {
+      return(country)
+    }
+    height <- round(size * 3 / 4)
+    glue(
+      '<img src="https://flagcdn.com/{size}x{height}/{tolower(code)}.png" width="{size}" height="{height}" alt="{country}" title="{country}">'
+    )
+  }
+
+  output$driver_points <- renderUI({
     res <- season_results()
     sched <- schedule_data()
-    if (nrow(res) == 0 || nrow(sched) == 0) {
-      return(tibble())
+
+    if (nrow(sched) == 0) {
+      return(tags$p("Schedule not available."))
     }
-    res |>
-      mutate(round = as.integer(round)) |>
-      left_join(sched |> select(round, country), by = "round") |>
-      mutate(col = paste0(sprintf("R%02d ", round), flag_badge(country))) |>
-      select(driver, col, points) |>
-      mutate(points = if_else(is.na(points), "", as.character(points))) |>
-      distinct() |>
-      pivot_wider(names_from = col, values_from = points, values_fn = list) |>
-      arrange(driver)
+
+    # Get all drivers from results or standings
+    all_drivers <- driver_standings()
+    if (nrow(all_drivers) == 0) {
+      return(tags$p("Driver data not available."))
+    }
+    drivers <- all_drivers$driver
+
+    # Build points matrix: rows = drivers, cols = rounds
+    sched <- sched |> arrange(round)
+    rounds <- sched$round
+    countries <- sched$country
+
+    # Create header row with flags
+    header_cells <- list(
+      tags$th("Driver"),
+      tags$th(style = "text-align: center;", "Total")
+    )
+    for (i in seq_along(rounds)) {
+      header_cells <- c(
+        header_cells,
+        list(tags$th(
+          style = "text-align: center; min-width: 50px;",
+          HTML(flag_img(countries[i], size = 32))
+        ))
+      )
+    }
+
+    # Create data rows
+    body_rows <- lapply(drivers, function(drv) {
+      total_pts <- res |>
+        filter(driver == drv) |>
+        summarise(total = sum(points, na.rm = TRUE)) |>
+        pull(total)
+      total_val <- if (is.na(total_pts) || total_pts == 0) {
+        ""
+      } else {
+        as.character(total_pts)
+      }
+      cells <- list(
+        tags$td(style = "white-space: nowrap;", drv),
+        tags$td(style = "text-align: center; font-weight: bold;", total_val)
+      )
+      for (i in seq_along(rounds)) {
+        rnd <- rounds[i]
+        pts <- res |>
+          filter(driver == drv, round == as.character(rnd)) |>
+          pull(points)
+        pts_val <- if (length(pts) == 0 || is.na(pts[1])) {
+          ""
+        } else {
+          as.character(pts[1])
+        }
+        cells <- c(cells, list(tags$td(style = "text-align: center;", pts_val)))
+      }
+      tags$tr(cells)
+    })
+
+    tags$table(
+      class = "table table-striped table-bordered table-sm",
+      tags$thead(tags$tr(header_cells)),
+      tags$tbody(body_rows)
+    )
   })
 
-  constructor_points_table <- reactive({
+  output$team_points <- renderUI({
     res <- season_results()
     sched <- schedule_data()
-    if (nrow(res) == 0 || nrow(sched) == 0) {
-      return(tibble())
+
+    if (nrow(sched) == 0) {
+      return(tags$p("Schedule not available."))
     }
-    res |>
-      mutate(round = as.integer(round)) |>
-      left_join(sched |> select(round, country), by = "round") |>
-      group_by(constructor, round, country) |>
-      summarise(points = sum(points, na.rm = TRUE), .groups = "drop") |>
-      mutate(
-        points = if_else(points == 0, "", as.character(points)),
-        col = paste0(sprintf("R%02d ", round), flag_badge(country))
-      ) |>
-      select(constructor, col, points) |>
-      distinct() |>
-      pivot_wider(names_from = col, values_from = points, values_fn = list) |>
-      arrange(constructor)
+
+    # Get all constructors from standings
+    all_constructors <- constructor_standings()
+    if (nrow(all_constructors) == 0) {
+      return(tags$p("Constructor data not available."))
+    }
+    constructors <- all_constructors$constructor
+
+    # Aggregate points by constructor and round
+    team_pts <- res |>
+      group_by(constructor, round) |>
+      summarise(points = sum(points, na.rm = TRUE), .groups = "drop")
+
+    # Build points matrix
+    sched <- sched |> arrange(round)
+    rounds <- sched$round
+    countries <- sched$country
+
+    # Create header row with flags
+    header_cells <- list(
+      tags$th("Team"),
+      tags$th(style = "text-align: center;", "Total")
+    )
+    for (i in seq_along(rounds)) {
+      header_cells <- c(
+        header_cells,
+        list(tags$th(
+          style = "text-align: center; min-width: 50px;",
+          HTML(flag_img(countries[i], size = 32))
+        ))
+      )
+    }
+
+    # Create data rows
+    body_rows <- lapply(constructors, function(team) {
+      total_pts <- team_pts |>
+        filter(constructor == team) |>
+        summarise(total = sum(points, na.rm = TRUE)) |>
+        pull(total)
+      total_val <- if (is.na(total_pts) || total_pts == 0) {
+        ""
+      } else {
+        as.character(total_pts)
+      }
+      cells <- list(
+        tags$td(style = "white-space: nowrap;", team),
+        tags$td(style = "text-align: center; font-weight: bold;", total_val)
+      )
+      for (i in seq_along(rounds)) {
+        rnd <- rounds[i]
+        pts <- team_pts |>
+          filter(constructor == team, round == as.character(rnd)) |>
+          pull(points)
+        pts_val <- if (length(pts) == 0 || is.na(pts[1]) || pts[1] == 0) {
+          ""
+        } else {
+          as.character(pts[1])
+        }
+        cells <- c(cells, list(tags$td(style = "text-align: center;", pts_val)))
+      }
+      tags$tr(cells)
+    })
+
+    tags$table(
+      class = "table table-striped table-bordered table-sm",
+      tags$thead(tags$tr(header_cells)),
+      tags$tbody(body_rows)
+    )
   })
-
-  output$driver_points <- renderTable(
-    {
-      driver_points_table()
-    },
-    sanitize.text.function = identity,
-    bordered = TRUE,
-    striped = TRUE
-  )
-
-  output$team_points <- renderTable(
-    {
-      constructor_points_table()
-    },
-    sanitize.text.function = identity,
-    bordered = TRUE,
-    striped = TRUE
-  )
 }
 
 shinyApp(ui, server)
