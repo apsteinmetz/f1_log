@@ -1,3 +1,7 @@
+# ==============================================================================
+# SETUP - Libraries, Constants, and Helper Functions
+# ==============================================================================
+
 library(shiny)
 library(bslib)
 library(tidyverse)
@@ -56,7 +60,10 @@ country_iso_lookup <- c(
 
 flag_badge <- function(country, size = 24) {
   if (
-    is.null(country) || length(country) == 0 || is.na(country) || country == ""
+    is.null(country) ||
+      length(country) == 0 ||
+      is.na(country) ||
+      country == ""
   ) {
     return(tags$span("Unknown"))
   }
@@ -78,7 +85,8 @@ flag_badge <- function(country, size = 24) {
 }
 
 fetch_json <- function(path, limit = 400) {
-  req <- request(glue("{base_url}/{path}.json")) |> req_url_query(limit = limit)
+  req <- request(glue("{base_url}/{path}.json")) |>
+    req_url_query(limit = limit)
   tryCatch(
     req |>
       req_perform() |>
@@ -398,6 +406,9 @@ theme <- bs_theme(
   primary = "#e10600",
   base_font = font_google("Fira Sans")
 )
+# ==============================================================================
+# UI - User Interface Definition
+# ==============================================================================
 
 ui <- page_navbar(
   title = tags$div(
@@ -412,10 +423,10 @@ ui <- page_navbar(
   nav_panel(
     "Predictions",
     card(
+      min_height = "150px",
       card_body(
-        class = "py-2",
         layout_columns(
-          col_widths = c(4, 4, 4),
+          col_widths = c(3, 2, 2, 5),
           textInput("user_name", "Your Name", placeholder = "Enter your name"),
           actionButton(
             "load_predictions",
@@ -426,79 +437,100 @@ ui <- page_navbar(
             "save_predictions",
             "Save My Predictions",
             class = "btn-success mt-4"
+          ),
+          div(
+            # class = "mt-4",
+            uiOutput("races_progress")
           )
         )
       )
     ),
-    layout_columns(
-      col_widths = c(3, 2, 3, 2, 2),
-      card(
-        card_header("Driver Predictions"),
-        card_body(
-          uiOutput("driver_predictions"),
-          actionButton(
-            "clear_driver_predictions",
-            "Clear",
-            class = "btn-secondary btn-sm mt-2"
-          )
-        )
-      ),
-      card(
-        card_header("Driver Standings"),
-        card_body(
-          tableOutput("driver_standings_table")
-        )
-      ),
-      card(
-        card_header("Team Predictions"),
-        card_body(
-          uiOutput("team_predictions"),
-          actionButton(
-            "clear_team_predictions",
-            "Clear",
-            class = "btn-secondary btn-sm mt-2"
-          )
-        )
-      ),
-      card(
-        card_header("Constructor Standings"),
-        card_body(
-          tableOutput("constructor_standings_table")
-        )
-      ),
-      card(
-        card_header("Podium Predictions"),
-        card_body(
-          div(
-            class = "d-flex align-items-center mb-2",
-            tags$label("Driver", class = "me-2", style = "min-width: 50px;"),
-            div(
-              style = "flex: 1;",
-              selectInput(
-                "most_podium_driver",
-                NULL,
-                choices = NULL,
-                width = "100%"
+    card(
+      card_body(
+        layout_columns(
+          col_widths = c(2, 2, 2, 2, 2, 2),
+          card(
+            card_header("Driver Predictions"),
+            card_body(
+              uiOutput("driver_predictions"),
+              actionButton(
+                "clear_driver_predictions",
+                "Clear",
+                class = "btn-secondary btn-sm mt-2"
               )
             )
           ),
-          div(
-            class = "d-flex align-items-center mb-2",
-            tags$label("Team", class = "me-2", style = "min-width: 50px;"),
-            div(
-              style = "flex: 1;",
-              selectInput(
-                "most_podium_team",
-                NULL,
-                choices = NULL,
-                width = "100%"
+          card(
+            card_header("Driver Standings"),
+            card_body(
+              tableOutput("driver_standings_table")
+            )
+          ),
+          card(
+            card_header("Team Predictions"),
+            card_body(
+              uiOutput("team_predictions"),
+              actionButton(
+                "clear_team_predictions",
+                "Clear",
+                class = "btn-secondary btn-sm mt-2"
               )
             )
           ),
-          actionButton(
-            "clear_podium_predictions",
-            "Clear",
-            class = "btn-secondary btn-sm mt-2"
+          card(
+            card_header("Constructor Standings"),
+            card_body(
+              tableOutput("constructor_standings_table")
+            )
+          ),
+          card(
+            card_header("Podium Predictions"),
+            card_body(
+              div(
+                class = "d-flex align-items-center mb-2",
+                tags$label(
+                  "Driver",
+                  class = "me-2",
+                  style = "min-width: 50px;"
+                ),
+                div(
+                  style = "flex: 1;",
+                  selectInput(
+                    "most_podium_driver",
+                    NULL,
+                    choices = NULL,
+                    width = "100%"
+                  )
+                )
+              ),
+              div(
+                class = "d-flex align-items-center mb-2",
+                tags$label("Team", class = "me-2", style = "min-width: 50px;"),
+                div(
+                  style = "flex: 1;",
+                  selectInput(
+                    "most_podium_team",
+                    NULL,
+                    choices = NULL,
+                    width = "100%"
+                  )
+                )
+              ),
+              actionButton(
+                "clear_podium_predictions",
+                "Clear",
+                class = "btn-secondary btn-sm mt-2"
+              )
+            )
+          ),
+          card(
+            card_header("Podium Standings"),
+            card_body(
+              tags$p(tags$strong("Drivers")),
+              tableOutput("podium_driver_standings_table"),
+              tags$p(tags$strong("Teams"), class = "mt-3"),
+              tableOutput("podium_team_standings_table")
+            )
           )
         )
       )
@@ -547,6 +579,10 @@ ui <- page_navbar(
   theme = theme,
   fillable = TRUE
 )
+
+# ==============================================================================
+# SERVER - Application Logic
+# ==============================================================================
 
 server <- function(input, output, session) {
   refresh_trigger <- reactiveVal(Sys.time())
@@ -823,12 +859,24 @@ server <- function(input, output, session) {
         } else {
           ""
         }
+        past_race <- is_past_race(r$date[[1]], r$time[[1]])
+        card_class <- if (past_race) {
+          "shadow-sm h-100"
+        } else {
+          "shadow-sm h-100"
+        }
+        card_style <- if (past_race) {
+          "border: 2px solid #28a745;"
+        } else {
+          NULL
+        }
         actionButton(
           paste0("race_", round_val),
           label = NULL,
           class = "p-0 border-0 bg-transparent w-100",
           card(
-            class = "shadow-sm h-100",
+            class = card_class,
+            style = card_style,
             card_body(
               class = "text-center",
               flag_badge(r$country[[1]], size = 48),
@@ -1256,6 +1304,66 @@ server <- function(input, output, session) {
     {
       constructor_standings() |>
         select(Pos = position, Constructor = constructor)
+    },
+    striped = TRUE,
+    bordered = TRUE
+  )
+
+  output$races_progress <- renderUI({
+    sched <- schedule_data()
+    if (nrow(sched) == 0) {
+      return(tags$p("Schedule not available."))
+    }
+    total_races <- nrow(sched)
+    completed_races <- sum(map_lgl(seq_len(nrow(sched)), function(i) {
+      is_past_race(sched$date[[i]], sched$time[[i]])
+    }))
+    value_box(
+      title = "Season Progress",
+      value = paste0(completed_races, " of ", total_races),
+      showcase = icon("flag-checkered"),
+      # theme = "blue",
+      max_height = "100px",
+      p("races completed")
+    )
+  })
+
+  # Compute podium standings (positions 1, 2, or 3)
+  podium_driver_standings <- reactive({
+    res <- season_results()
+    if (nrow(res) == 0) {
+      return(tibble(Driver = character(), Podiums = integer()))
+    }
+    res |>
+      filter(position <= 3) |>
+      count(driver, name = "podiums") |>
+      arrange(desc(podiums)) |>
+      rename(Driver = driver, Podiums = podiums)
+  })
+
+  podium_team_standings <- reactive({
+    res <- season_results()
+    if (nrow(res) == 0) {
+      return(tibble(Team = character(), Podiums = integer()))
+    }
+    res |>
+      filter(position <= 3) |>
+      count(constructor, name = "podiums") |>
+      arrange(desc(podiums)) |>
+      rename(Team = constructor, Podiums = podiums)
+  })
+
+  output$podium_driver_standings_table <- renderTable(
+    {
+      podium_driver_standings()
+    },
+    striped = TRUE,
+    bordered = TRUE
+  )
+
+  output$podium_team_standings_table <- renderTable(
+    {
+      podium_team_standings()
     },
     striped = TRUE,
     bordered = TRUE

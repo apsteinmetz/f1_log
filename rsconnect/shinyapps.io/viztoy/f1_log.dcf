@@ -1,0 +1,13 @@
+name: f1_log
+title: f1_log
+username: viztoy
+account: viztoy
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16904580
+bundleId: 11713274
+url: https://viztoy.shinyapps.io/f1_log/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: instructions.md|README.md
