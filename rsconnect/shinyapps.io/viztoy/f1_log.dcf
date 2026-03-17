@@ -5,7 +5,7 @@ account: viztoy
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 16904580
-bundleId: 11713274
+bundleId: 11717508
 url: https://viztoy.shinyapps.io/f1_log/
 version: 1
 asMultiple: FALSE

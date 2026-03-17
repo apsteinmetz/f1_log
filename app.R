@@ -9,6 +9,7 @@ library(httr2)
 library(lubridate)
 library(leaflet)
 library(glue)
+library(rvest)
 
 season_year <- 2026
 base_url <- "https://api.jolpi.ca/ergast/f1"
@@ -49,6 +50,90 @@ country_iso_lookup <- c(
   "United States" = "us",
   "USA" = "us"
 )
+
+# Driver of the Day - scrape from formula1.com
+# Cache to avoid repeated requests
+dotd_cache <- new.env()
+
+get_driver_of_the_day_data <- function(season) {
+  cache_key <- as.character(season)
+  if (exists(cache_key, envir = dotd_cache)) {
+    return(get(cache_key, envir = dotd_cache))
+  }
+
+  url <- glue(
+    "https://www.formula1.com/en/results/{season}/awards/driver-of-the-day"
+  )
+
+  tryCatch(
+    {
+      page <- read_html(url)
+
+      # Find all table rows in the DOTD results table
+      rows <- page |> html_elements("table tbody tr")
+
+      if (length(rows) == 0) {
+        assign(
+          cache_key,
+          tibble(country = character(), driver = character()),
+          envir = dotd_cache
+        )
+        return(get(cache_key, envir = dotd_cache))
+      }
+
+      dotd_data <- map_dfr(rows, function(row) {
+        # Country is the text from the first <td> element
+        country <- row |>
+          html_element("td:first-child") |>
+          html_text(trim = TRUE)
+
+        # Driver name is the second element with class max-md:hidden
+        driver_spans <- row |> html_elements("span.max-md\\:hidden")
+        driver_name <- if (length(driver_spans) >= 2) {
+          html_text(driver_spans[2], trim = TRUE)
+        } else if (length(driver_spans) == 1) {
+          html_text(driver_spans[1], trim = TRUE)
+        } else {
+          NA_character_
+        }
+
+        tibble(country = country, driver = driver_name)
+      })
+
+      assign(cache_key, dotd_data, envir = dotd_cache)
+      dotd_data
+    },
+    error = function(e) {
+      assign(
+        cache_key,
+        tibble(country = character(), driver = character()),
+        envir = dotd_cache
+      )
+      get(cache_key, envir = dotd_cache)
+    }
+  )
+}
+
+get_driver_of_the_day <- function(country, season) {
+  dotd_data <- get_driver_of_the_day_data(season)
+
+  if (nrow(dotd_data) == 0) {
+    return(NA_character_)
+  }
+
+  # Find matching country
+  match_row <- dotd_data |>
+    filter(
+      str_detect(country, fixed(!!country, ignore_case = TRUE)) |
+        str_detect(!!country, fixed(country, ignore_case = TRUE))
+    )
+
+  if (nrow(match_row) > 0) {
+    return(match_row$driver[1])
+  }
+
+  NA_character_
+}
 
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0) {
@@ -713,12 +798,14 @@ server <- function(input, output, session) {
   race_highlights <- reactive({
     res <- race_results()
     pits <- pit_data()
+    info <- race_info()
     if (nrow(res) == 0 || ncol(res) == 0) {
       return(list(
         fastest_lap = list(label = "N/A", detail = ""),
         fastest_pit = list(label = "N/A", detail = ""),
         overtakes = list(label = "N/A", detail = ""),
-        penalties = list(label = "N/A", detail = "")
+        penalties = list(label = "N/A", detail = ""),
+        driver_of_the_day = list(label = "N/A", detail = "")
       ))
     }
 
@@ -782,11 +869,24 @@ server <- function(input, output, session) {
       list(label = penalties_row$driver, detail = penalties_row$status)
     }
 
+    # Get Driver of the Day (match by country)
+    dotd <- if (nrow(info) > 0) {
+      get_driver_of_the_day(info$country[[1]], as.integer(info$season[[1]]))
+    } else {
+      NA_character_
+    }
+    driver_of_the_day <- if (is.na(dotd)) {
+      list(label = "N/A", detail = "")
+    } else {
+      list(label = dotd, detail = "Fan voted")
+    }
+
     list(
       fastest_lap = fastest_lap,
       fastest_pit = fastest_pit,
       overtakes = overtakes,
-      penalties = penalties
+      penalties = penalties,
+      driver_of_the_day = driver_of_the_day
     )
   })
 
@@ -981,6 +1081,11 @@ server <- function(input, output, session) {
                 title = "Most Overtakes",
                 value = metrics$overtakes$label,
                 p(metrics$overtakes$detail)
+              ),
+              value_box(
+                title = "Driver of the Day",
+                value = metrics$driver_of_the_day$label,
+                p(metrics$driver_of_the_day$detail)
               ),
               value_box(
                 title = "Penalties",
