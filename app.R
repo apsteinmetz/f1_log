@@ -906,7 +906,36 @@ server <- function(input, output, session) {
 
   output$qual_table <- renderTable(
     {
-      qual_data()
+      qual <- qual_data()
+      res <- race_results()
+
+      if (nrow(qual) == 0 && nrow(res) == 0) {
+        return(tibble())
+      }
+
+      # Find drivers in race results but not in qualifying (DNF in quali)
+      if (nrow(res) > 0) {
+        qual_drivers <- if (nrow(qual) > 0) qual$driver else character()
+        missing_drivers <- res |>
+          filter(!driver %in% qual_drivers) |>
+          select(driver, constructor, grid) |>
+          mutate(
+            position = grid,
+            q1 = "DNF",
+            q2 = "",
+            q3 = ""
+          ) |>
+          select(position, driver, constructor, q1, q2, q3)
+
+        if (nrow(qual) > 0) {
+          qual <- bind_rows(qual, missing_drivers) |>
+            arrange(position)
+        } else if (nrow(missing_drivers) > 0) {
+          qual <- missing_drivers |> arrange(position)
+        }
+      }
+
+      qual
     },
     striped = TRUE,
     bordered = TRUE,
@@ -928,13 +957,21 @@ server <- function(input, output, session) {
 
   output$result_table <- renderTable(
     {
-      race_results() |> select(position, driver, constructor, points, status)
+      race_results() |>
+        select(
+          Pos = position_text,
+          Grid = grid,
+          Driver = driver,
+          Team = constructor,
+          Pts = points,
+          Status = status
+        )
     },
     striped = TRUE,
     bordered = TRUE,
     width = "100%",
     spacing = "s",
-    digits = 3
+    digits = 0
   )
 
   observeEvent(input$close_race, {
